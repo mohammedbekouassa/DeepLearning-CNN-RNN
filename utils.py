@@ -1,46 +1,62 @@
-# utils.py
-import os
-import numpy as np
-import torch
-import pandas as pd
-from torch.utils.data import DataLoader, TensorDataset
+import time, torch, random, numpy as np
+from torch.utils.data import DataLoader, random_split, TensorDataset
 
-def _load_csv_df(path: str) -> pd.DataFrame:
-    # Try with header; if first col isn't 'label', load without header.
-    try:
-        df = pd.read_csv(path)
-        if df.columns[0] != "label":
-            df = pd.read_csv(path, header=None)
-            df.rename(columns={0: "label"}, inplace=True)
-    except pd.errors.ParserError:
-        df = pd.read_csv(path, header=None)
-        df.rename(columns={0: "label"}, inplace=True)
-    return df
+MNIST_MEAN = 0.1307
+MNIST_STD  = 0.3081
 
-def load_csv_pair(train_csv="mnist_train.csv", test_csv="mnist_test.csv", bs=128, pin=False, workers=2):
-    for f in (train_csv, test_csv):
-        if not os.path.exists(f):
-            raise FileNotFoundError(f"Missing {f} next to train.py")
+def set_seed(seed=42):
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
-    tr_df = _load_csv_df(train_csv)
-    te_df = _load_csv_df(test_csv)
+def _load_csv(path, has_header=True):
+    # row: label,p0,...,p783  with pixels 0..255
+    skip = 1 if has_header else 0
+    arr = np.loadtxt(path, delimiter=",", dtype=np.float32, skiprows=skip)
+    if arr.ndim == 1:
+        arr = np.expand_dims(arr, 0)
+    y = arr[:, 0].astype(np.int64)
+    X = arr[:, 1:] / 255.0
+    if X.shape[1] != 784:
+        raise ValueError(f"{path}: expected 784 pixels, got {X.shape[1]}")
+    X = X.reshape((-1, 1, 28, 28))
+    X = (X - MNIST_MEAN) / MNIST_STD  # same normalization as torchvision MNIST
+    return TensorDataset(torch.from_numpy(X), torch.from_numpy(y))
 
-    Xtr = (tr_df.iloc[:, 1:].to_numpy(dtype=np.float32) / 255.0).reshape(-1, 1, 28, 28)
-    ytr = tr_df.iloc[:, 0].to_numpy(dtype=np.int64)
-    Xte = (te_df.iloc[:, 1:].to_numpy(dtype=np.float32) / 255.0).reshape(-1, 1, 28, 28)
-    yte = te_df.iloc[:, 0].to_numpy(dtype=np.int64)
+def get_loaders(batch_size=128, val_split=0.1, num_workers=2,
+                train_csv=None, test_csv=None, has_header=True):
+    if train_csv and test_csv:
+        train_full = _load_csv(train_csv, has_header)
+        test_ds    = _load_csv(test_csv,  has_header)
+    else:
+        from torchvision import datasets, transforms
+        tfm = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((MNIST_MEAN,), (MNIST_STD,))
+        ])
+        train_full = datasets.MNIST(root="./data", train=True, download=True, transform=tfm)
+        test_ds    = datasets.MNIST(root="./data", train=False, download=True, transform=tfm)
 
-    Xtr = torch.from_numpy(Xtr); ytr = torch.from_numpy(ytr)
-    Xte = torch.from_numpy(Xte); yte = torch.from_numpy(yte)
+    val_len = int(len(train_full)*val_split)
+    train_len = len(train_full) - val_len
+    train_ds, val_ds = random_split(train_full, [train_len, val_len])
 
-    tr = DataLoader(TensorDataset(Xtr, ytr), batch_size=bs, shuffle=True,
-                    num_workers=workers, pin_memory=pin)
-    te = DataLoader(TensorDataset(Xte, yte), batch_size=bs, shuffle=False,
-                    num_workers=workers, pin_memory=pin)
-    return tr, te
+    train_ld = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=num_workers, pin_memory=True)
+    val_ld   = DataLoader(val_ds,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    test_ld  = DataLoader(test_ds,  batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True)
+    return train_ld, val_ld, test_ld
 
-def wait_key(msg):
-    try:
-        input(msg)
-    except EOFError:
-        print("(no stdin; continuing)")
+@torch.no_grad()
+def evaluate(model, loader, device, criterion):
+    model.eval()
+    total, correct, loss_sum = 0, 0, 0.0
+    for x,y in loader:
+        x,y = x.to(device), y.to(device)
+        logits = model(x)
+        loss = criterion(logits, y)
+        loss_sum += loss.item()*y.size(0)
+        pred = logits.argmax(1)
+        correct += (pred==y).sum().item()
+        total += y.size(0)
+    return loss_sum/total, correct/total
+
+def now():
+    return time.perf_counter()
