@@ -5,7 +5,7 @@ Perform a comparative study between two neural network architectures (CNN and LS
 
 The project fulfills all exercise requirements:
 - Data preprocessing (normalization, reshaping)
-- One-hot encoding of labels (saved as proof)
+- One-hot encoding of labels
 - Model training and testing
 - Comparison of accuracy, loss, and training time
 - Result visualization through clear plots
