@@ -1,0 +1,9 @@
+﻿# IDE
+.idea/
+# Bytecode
+__pycache__/
+*.py[cod]
+# Artifacts
+*.png
+*.csv
+results.csv
