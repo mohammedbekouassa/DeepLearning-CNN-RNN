@@ -23,7 +23,7 @@ def pick_device(device_arg: str) -> str:
             print("🟠 Using Apple Metal (MPS)")
             return "mps"
         print("🔵 Using CPU")
-        print("🔵 Using CPU")
+        
         return "cpu"
     if device_arg == "cuda":
         if torch.cuda.is_available():
