@@ -1,0 +1,5 @@
+test_loss=0.0331
+test_acc=0.9890
+params=421642
+avg_sec_per_epoch=8.13
+total_sec=40.66
