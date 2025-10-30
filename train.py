@@ -1,7 +1,7 @@
-import argparse, os, csv, time, torch
+import argparse, csv, time, torch
 from torch import nn, optim
 from pathlib import Path
-from utils import set_seed, get_loaders, evaluate, now, MNIST_MEAN, MNIST_STD
+from utils import set_seed, get_loaders, evaluate, MNIST_MEAN, MNIST_STD
 
 def build_model(name):
     if name=="cnn":  from models.cnn import SimpleCNN; return SimpleCNN()
@@ -9,20 +9,11 @@ def build_model(name):
     raise ValueError("Unknown model")
 
 def _autodetect_csv():
-    tr, te = "mnist_train.csv", "mnist_test.csv"
-    if not (os.path.exists(tr) and os.path.exists(te)): return None, None, False
-    with open(tr,"r",encoding="utf-8") as f:
-        first=f.readline().strip().split(",")
-    if not first: return tr, te, False
-    if first[0].lower()=="label": return tr, te, True
-    try: float(first[0]); return tr, te, len(first)!=785
-    except ValueError: return tr, te, True
+    return "mnist_train.csv", "mnist_test.csv", True
 
 def train_one(tag, args):
     set_seed(args.seed)
-    dev = (torch.device("cuda") if (args.device in ("auto","cuda") and torch.cuda.is_available())
-           else torch.device("mps") if (args.device in ("auto","mps") and getattr(torch.backends,"mps",None) and torch.backends.mps.is_available())
-           else torch.device(args.device if args.device!="auto" else "cpu"))
+    dev = torch.device("cuda" if (args.device in ("auto","cuda") and torch.cuda.is_available()) else "cpu")
     model = build_model(tag).to(dev)
     train_ld, val_ld, test_ld = get_loaders(batch_size=args.batch_size, val_split=0.1, num_workers=2,
                                             train_csv=args.train_csv, test_csv=args.test_csv, has_header=args.has_header)
@@ -31,54 +22,50 @@ def train_one(tag, args):
     print(f"[{tag.upper()}] start | device={dev} | params={params}")
 
     if args.dump_onehot:
-        xb,yb = next(iter(train_ld))
+        _, yb = next(iter(train_ld))
         oh = torch.nn.functional.one_hot(yb, num_classes=10).float()
-        torch.save({"y_indices": yb[:256], "y_onehot": oh[:256], "note": f"Normalized mean={MNIST_MEAN}, std={MNIST_STD}"}, outdir/"onehot_sample.pt")
-        with open(outdir/"onehot_preview.csv","w",newline="") as f:
-            w=csv.writer(f); w.writerow(["label"]+[f"c{i}" for i in range(10)])
-            [w.writerow([int(yb[i])]+[int(v) for v in oh[i].tolist()]) for i in range(min(20,yb.size(0)))]
+        torch.save({"y_indices": yb[:256], "y_onehot": oh[:256],
+                    "note": f"Normalized mean={MNIST_MEAN}, std={MNIST_STD}"},
+                   outdir/"onehot_sample.pt")
 
     crit = nn.CrossEntropyLoss(); opt = optim.Adam(model.parameters(), lr=args.lr)
-    metrics_path = outdir/"metrics.csv"
-    with open(metrics_path,"w",newline="") as f: csv.writer(f).writerow(["epoch","train_loss","train_acc","val_loss","val_acc","seconds"])
+    mp = outdir/"metrics.csv"
+    with open(mp,"w",newline="") as f:
+        csv.writer(f).writerow(["epoch","train_loss","train_acc","val_loss","val_acc","seconds"])
 
-    wall_start = time.perf_counter(); epoch_times=[]
+    t_all = time.perf_counter(); epoch_times=[]
     for ep in range(1, args.epochs+1):
-        model.train(); total=correct=0; loss_sum=0.0; t0=now()
+        model.train(); total=correct=0; loss_sum=0.0; t0=time.perf_counter()
         for x,y in train_ld:
             x,y = x.to(dev), y.to(dev); opt.zero_grad()
             logits = model(x)
-            if args.use_onehot_loss:
-                oh = torch.nn.functional.one_hot(y, num_classes=10).float()
-                loss = -(oh * torch.log_softmax(logits, dim=1)).sum(dim=1).mean()
-            else:
-                loss = crit(logits, y)
+            loss = (-(torch.nn.functional.one_hot(y,10).float()*torch.log_softmax(logits,1)).sum(1).mean()
+                    if args.use_onehot_loss else crit(logits,y))
             loss.backward(); opt.step()
             n=y.size(0); loss_sum+=loss.item()*n; correct+=(logits.argmax(1)==y).sum().item(); total+=n
-        train_loss, train_acc = loss_sum/total, correct/total
-        val_loss, val_acc = evaluate(model, val_ld, dev, crit)
-        dt = now()-t0; epoch_times.append(dt)
-        with open(metrics_path,"a",newline="") as f: csv.writer(f).writerow([ep,f"{train_loss:.4f}",f"{train_acc:.4f}",f"{val_loss:.4f}",f"{val_acc:.4f}",f"{dt:.2f}"])
+        tl, ta = loss_sum/total, correct/total
+        vl, va = evaluate(model, val_ld, dev, crit)
+        dt = time.perf_counter()-t0; epoch_times.append(dt)
+        with open(mp,"a",newline="") as f:
+            csv.writer(f).writerow([ep,f"{tl:.4f}",f"{ta:.4f}",f"{vl:.4f}",f"{va:.4f}",f"{dt:.2f}"])
         torch.save(model.state_dict(), outdir/f"epoch{ep}.pt")
-        print(f"[{tag.upper()}] epoch {ep}/{args.epochs} | train_loss {train_loss:.4f} | val_loss {val_loss:.4f} | val_acc {val_acc:.4f} | {dt:.2f}s")
+        print(f"[{tag.upper()}] epoch {ep}/{args.epochs} | train_loss {tl:.4f} | val_loss {vl:.4f} | val_acc {va:.4f} | {dt:.2f}s")
 
-    wall_total = time.perf_counter()-wall_start
-    avg_epoch = sum(epoch_times)/len(epoch_times)
-    test_loss, test_acc = evaluate(model, test_ld, dev, crit)
+    total_s = time.perf_counter()-t_all
+    avg_s = sum(epoch_times)/len(epoch_times)
+    test_l, test_a = evaluate(model, test_ld, dev, crit)
 
     with open(outdir/"summary.csv","w",newline="") as f:
         w=csv.writer(f); w.writerow(["model","params","epochs","avg_sec_per_epoch","total_sec","test_acc","test_loss","device"])
-        w.writerow([tag,params,args.epochs,f"{avg_epoch:.2f}",f"{wall_total:.2f}",f"{test_acc:.4f}",f"{test_loss:.4f}",str(dev)])
+        w.writerow([tag,params,args.epochs,f"{avg_s:.2f}",f"{total_s:.2f}",f"{test_a:.4f}",f"{test_l:.4f}",str(dev)])
     with open(outdir/"test.txt","w") as f:
-        f.write(f"test_loss={test_loss:.4f}\n"
-                f"test_acc={test_acc:.4f}\n"
+        f.write(f"test_loss={test_l:.4f}\n"
+                f"test_acc={test_a:.4f}\n"
                 f"params={params}\n"
-                f"avg_sec_per_epoch={avg_epoch:.2f}\n"
-                f"total_sec={wall_total:.2f}\n")
-    print(f"[{tag.upper()}] done | acc {test_acc:.4f} | loss {test_loss:.4f} | avg_s/ep {avg_epoch:.2f} | total_s {wall_total:.2f}")
-    del model
-    if torch.cuda.is_available(): torch.cuda.empty_cache()
-    return {"model":tag,"params":params,"epochs":args.epochs,"avg_sec_per_epoch":avg_epoch,"total_sec":wall_total,"test_acc":test_acc,"test_loss":test_loss,"device":str(dev)}
+                f"avg_sec_per_epoch={avg_s:.2f}\n"
+                f"total_sec={total_s:.2f}\n")
+    print(f"[{tag.upper()}] done | acc {test_a:.4f} | loss {test_l:.4f} | avg_s/ep {avg_s:.2f} | total_s {total_s:.2f}")
+    return {"model":tag,"params":params,"epochs":args.epochs,"avg_sec_per_epoch":avg_s,"total_sec":total_s,"test_acc":test_a,"test_loss":test_l,"device":str(dev)}
 
 def main():
     tr,te,hh=_autodetect_csv()
@@ -96,9 +83,9 @@ def main():
     ap.add_argument("--dump-onehot", action="store_true", default=True)
     ap.add_argument("--use-onehot-loss", action="store_true", default=False)
     args=ap.parse_args()
-    order = ["cnn","lstm"] if args.model=="both" else [args.model]
-    results = [train_one(m,args) for m in order]
-    comb = Path(args.outdir)/"combined_summary.csv"
+    order=["cnn","lstm"] if args.model=="both" else [args.model]
+    results=[train_one(m,args) for m in order]
+    comb=Path(args.outdir)/"combined_summary.csv"
     with open(comb,"w",newline="") as f:
         w=csv.writer(f); w.writerow(["model","params","epochs","avg_sec_per_epoch","total_sec","test_acc","test_loss","device"])
         [w.writerow([r["model"],r["params"],r["epochs"],f"{r['avg_sec_per_epoch']:.2f}",f"{r['total_sec']:.2f}",f"{r['test_acc']:.4f}",f"{r['test_loss']:.4f}",r["device"]]) for r in results]
