@@ -21,12 +21,7 @@ def train_one(tag, args):
     params = sum(p.numel() for p in model.parameters())
     print(f"[{tag.upper()}] start | device={dev} | params={params}")
 
-    if args.dump_onehot:
-        _, yb = next(iter(train_ld))
-        oh = torch.nn.functional.one_hot(yb, num_classes=10).float()
-        torch.save({"y_indices": yb[:256], "y_onehot": oh[:256],
-                    "note": f"Normalized mean={MNIST_MEAN}, std={MNIST_STD}"},
-                   outdir/"onehot_sample.pt")
+
 
     crit = nn.CrossEntropyLoss(); opt = optim.Adam(model.parameters(), lr=args.lr)
     mp = outdir/"metrics.csv"
